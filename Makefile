@@ -1,0 +1,2 @@
+all:
+	corebuild k.native
