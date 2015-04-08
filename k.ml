@@ -524,7 +524,7 @@ let vampersand_av_mm av x = av_generic_mm av vampersand_m x
 let vampersand_av_md av x = av_generic_md av vampersand x
 let vampersand_av_dm av x y = av_generic_dm av vampersand_m x y
 let vampersand_av_dd av x y = av_generic_dd av vampersand x y
-let vcomma x y = match x,y with (* join *)
+let vcomma x y = match x,y with (* join *) (* SLOW *)
     | KChar a, KCharArray b            -> KCharArray (Array.append [|a|] b)
     | KFloat a, KFloatArray b          -> KFloatArray (Array.append [|a|] b)
     | KInteger a, KIntegerArray b      -> KIntegerArray (Array.append [|a|] b)
@@ -720,7 +720,9 @@ let vquestion x y =
     | KFloatArray x, KFloat y -> find x y
     | _ -> raise (KError_type [x;y])
 let vquestion_m x = match x with
-  | KList x -> KList (Array.of_list (List.dedup (Array.to_list x)))
+  | KList x        -> KList (Array.of_list (List.dedup (Array.to_list x))) (* SLOW *)
+  | KSymbolArray x -> KSymbolArray (Array.of_list (List.dedup (Array.to_list x))) (* SLOW *)
+  | KCharArray x   -> KCharArray (Array.of_list (List.dedup (Array.to_list x))) (* SLOW *)
   | _ ->  raise (KError_rank [x])
 let vquestion_av_mm av x = av_generic_mm av vquestion_m x
 let vquestion_av_md av x = av_generic_md av vquestion x
@@ -1070,7 +1072,9 @@ and parse_fun t i = let j,t = parse_nested TkBraceO TkBraceC t i in let e = pars
   | 2 -> j, F2 e
 and parse_exp e t i : e =
   match e,lookahead t i,lookahead t (i+1) with
+  | None,                 Some(TkSpace,_),     Some (TkForwardslash,_)
   | None,                 None,                None                    -> ENull
+  | Some e,               Some(TkSpace,_),     Some (TkForwardslash,_)
   | Some e,               None,                None                    -> e
   | None,                 Some(TkBraceO,_),    _                       -> let i,f = parse_fun t (i+1) in parse_exp (Some (EFunction f)) t i
   | Some e,               Some(TkBracketO,_),  _                       -> let j, a = parse_args t (i+1) in

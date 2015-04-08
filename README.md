@@ -1,10 +1,10 @@
 # What
 
-Here's a WIP implementation of the [K2 language](http://en.wikipedia.org/wiki/K_(programming_language)) in OCaml. Some basic things already work. A whole bunch of things is not yet implemented - most notably, n-ary functions and n-ary function application.
+Here's a WIP implementation of the [K2 language](http://en.wikipedia.org/wiki/K_(programming_language)) in OCaml. Some basic things already work. A whole bunch of things does not yet.
 
 # Why
 
-fun, practice, finally learning K
+fun, practice etc
 
 # How
 
@@ -17,6 +17,8 @@ An example from [Ninety-Nine K problems](https://github.com/kevinlawler/kona/wik
 ~~~~
 k) compress : {x@&1,~=':x}
 k) compress["aaaaabbbccdddeee"]
+(KCharArray (a b c d e))
+k) ? "aaaaabbbccdddeee"  /same result using the range operator
 (KCharArray (a b c d e))
 ~~~~
 
