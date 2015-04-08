@@ -1,4 +1,4 @@
-Here's a WIP implementation of the [K2](http://en.wikipedia.org/wiki/K_(programming_language) in OCaml. Some basic things already work. A whole bunch of things is not yet implemented - most notably, n-ary functions and n-ary function application. Here's an example from [Ninety-Nine K problems](https://github.com/kevinlawler/kona/wiki/K-99%3A-Ninety-Nine-K-Problems)
+Here's a WIP implementation of the [K2](http://en.wikipedia.org/wiki/K_(programming_language)) in OCaml. Some basic things already work. A whole bunch of things is not yet implemented - most notably, n-ary functions and n-ary function application. Here's an example from [Ninety-Nine K problems](https://github.com/kevinlawler/kona/wiki/K-99%3A-Ninety-Nine-K-Problems)
 
 ~~~~
 k) compress : {x@&1,~=':x}
