@@ -1,6 +1,6 @@
 # What
 
-Here's a WIP implementation of the [K2 language](http://en.wikipedia.org/wiki/K_(programming_language)) in OCaml. Some basic things already work. A whole bunch of things does not yet.
+Here's a WIP implementation of the [K 2.0 language](http://en.wikipedia.org/wiki/K_(programming_language)) in OCaml. Some basic things already work. A whole bunch of things does not (yet).
 
 # Why
 
@@ -8,7 +8,7 @@ fun, practice etc
 
 # How
 
-[Kona wiki](https://github.com/kevinlawler/kona/wiki) and [K2 reference](http://web.archive.org/web/20050504070651/http://www.kx.com/technical/documents/kreflite.pdf)
+[Kona wiki](https://github.com/kevinlawler/kona/wiki), [K 2.0 reference](http://web.archive.org/web/20050504070651/http://www.kx.com/technical/documents/kreflite.pdf) and [manual](http://web.archive.org/web/20041022042401/http://www.kx.com/technical/documents/kusrlite.pdf).
 
 # Example
 
