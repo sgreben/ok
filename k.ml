@@ -1,7 +1,6 @@
 open Core.Std
 (* page 108
 FIXME: the parser cases for verb/adverb/function applications are messy, require cleanup for clarity
-TODO: arbitrary function arity & (partial) application f[x;;z]
 TODO: parse (and represent) partial verb application (e.g. (3 +) )
 TODO: parse
 TODO: proper equality tests for floats (tolerance), remove all polymorphic eq tests
@@ -9,6 +8,7 @@ TODO: attributes
 TODO: built-in operators (_in _draw etc.)
 TODO: special REPL commands (\p,..)
 TODO: missing operations: grep Not_implemented k.ml
+TODO: arbitrary function arity & (partial) application f[x;;z]
 X TODO: ktree
 X TODO: functions (e.g. {x@y-1})
 X TODO: definitions (e.g. elementat:123)
@@ -17,6 +17,7 @@ X TODO: parse (and represent) variable names (alpha without bquote)
 X TODO: finish verbs (verb compositions (e.g. (%-)[a;b]))
 X TODO: finish basic adverbs (distinguish dyadic/monadic application of the verb, do adverb compositions)
 X TODO: parse lists (e.g. (a;b;c))
+OPT: stage adverb functions (see http://engineering.issuu.com/2015/03/19/interpreters-in-ocaml.html)
 OPT: type tracking for list optimizations, e.g. (KList (TInteger,(KInteger x,KInteger y,KInteger z)) ~> KIntegerArray [|x,y,z|]
 OPT: constant folding for expressions e.g. (1,2,3,4) : EAppD(EInteger 1,VComma,EAppD(EInteger 2,VComma,....(,EInteger 4))) -> EIntegerArray [|1;2;3;4|]
 OPT: type (and shape) inference. likely necessary for simple JIT code as well as for performance
@@ -246,6 +247,19 @@ let rot (x:int) (y:'a array) : 'a array =
       Array.blit ~src:y ~src_pos:x ~dst:a ~dst_pos:0 ~len:k; (*SLOW*)
       Array.blit ~src:y ~src_pos:0 ~dst:a ~dst_pos:k ~len:x; (*SLOW*)
       a
+let rec shape x = match x with
+    | KFunction _ | KDictionary _ | KInteger _ | KChar _ | KFloat _ | KSymbol _ -> [||]
+    | KCharArray _| KFloatArray _| KIntegerArray _| KSymbolArray _ -> [|n x|]
+    | KList [||] -> [|0|]
+    | KList x -> let shapes = map x shape in
+                 let nx = Array.length x in
+                 let np = let rec loop acc i = if i = nx then acc else loop (Int.min acc (Array.length shapes.(i))) (i+1) in loop (Array.length shapes.(0)) 1 in
+                 if np = 0 then [|nx|] else
+                 let shape' = let rec level i = if i >= np then sub shapes.(0) 0 np else
+                                                     let ns = shapes.(0).(i) in
+                                                     let rec loop j = if j >= nx then true else (if shapes.(j).(i) = ns then loop (j+1) else false) in if loop 1 then level (i+1) else sub shapes.(0) 0 i
+                                   in level 0
+                 in append [|nx|] shape'
 
 let rec av_dd av f x y : k = match av,x,y with (* f:dyad, derived verb:dyad *)
   (* each *)
@@ -572,20 +586,28 @@ let vcomma x y = match x,y with (* join *)
     | KInteger x,      KFloatArray y   -> KFloatArray (append [|Float.of_int x|] y)
     | KFloatArray x,   KIntegerArray y -> KFloatArray (append x (map y Float.of_int))
     | KIntegerArray x, KFloatArray y   -> KFloatArray (append (map x Float.of_int) y)
+    (* non-list atoms. (t1,t1) where t1 has no vector representation; (t1,t2) where t1!=t2 *)
     | KDictionary _,KDictionary _|KFunction _,KFunction _|KNull,KNull|KChar _,KFloat _|KFloat _,KChar _|KChar _,KInteger _|KInteger _,KChar _|KInteger _,KSymbol _|KSymbol _,KInteger _|KInteger _,KNull|KNull,KInteger _|KFloat _,KSymbol _|KSymbol _,KFloat _|KFloat _,KFunction _|KFunction _,KFloat _|KFloat _,KNull|KNull,KFloat _|KFunction _,KSymbol _|KSymbol _,KFunction _|KDictionary _,KInteger _|KInteger _,KDictionary _|KDictionary _,KFloat _|KFloat _,KDictionary _|KDictionary _,KSymbol _|KSymbol _,KDictionary _|KDictionary _,KFunction _|KFunction _,KDictionary _|KDictionary _,KNull|KNull,KDictionary _|KFunction _,KInteger _|KInteger _,KFunction _|KFunction _,KNull|KNull,KFunction _|KNull,KSymbol _|KSymbol _,KNull|KChar _,KSymbol _|KSymbol _,KChar _|KChar _,KDictionary _|KDictionary _,KChar _|KChar _,KFunction _|KFunction _,KChar _|KChar _,KNull|KNull,KChar _ ->
       KList [|x;y|]
+    (* not list,list *)
     | KSymbol _,KList y|KNull,KList y|KInteger _,KList y|KFloat _,KList y|KChar _,KList y|KDictionary _,KList y|KFunction _,KList y ->
       KList (append [|x|] y)
+    (* list,not list *)
     | KList x,KSymbol _| KList x,KNull| KList x,KInteger _| KList x,KFloat _| KList x,KChar _| KList x,KDictionary _ | KList x,KFunction _ ->
       KList (append x [|y|])
+    (* list,vector *)
     | KList x,KSymbolArray _|KList x,KIntegerArray _|KList x,KFloatArray _ |KList x,KCharArray _ ->
       KList (append x (as_list y))
+    (* vector,list *)
     | KSymbolArray _,KList y|KIntegerArray _,KList y|KFloatArray _,KList y|KCharArray _,KList y ->
       KList (append (as_list x) y)
+    (* t1-vector,t2-atom (t1!=t2) *)
     | KChar _,KFloatArray _|KChar _,KIntegerArray _|KChar _,KSymbolArray _|KDictionary _,KCharArray _|KDictionary _,KFloatArray _|KDictionary _,KIntegerArray _|KDictionary _,KSymbolArray _|KFloat _,KCharArray _|KFloat _,KSymbolArray _|KFunction _,KCharArray _|KFunction _,KFloatArray _|KFunction _,KIntegerArray _|KFunction _,KSymbolArray _|KInteger _,KCharArray _|KInteger _,KSymbolArray _|KIntegerArray _,KChar _|KNull,KCharArray _|KNull,KFloatArray _|KNull,KIntegerArray _|KNull,KSymbolArray _|KSymbol _,KCharArray _|KSymbol _,KIntegerArray _|KSymbol _,KFloatArray _ ->
       KList (append [|x|] (as_list y))
+    (* t1-atom,t2-vector (t1!=t2) *)
     | KCharArray _,KDictionary _|KCharArray _,KFloat _|KCharArray _,KFunction _|KCharArray _,KInteger _|KCharArray _,KNull|KCharArray _,KSymbol _|KFloatArray _,KChar _|KFloatArray _,KDictionary _|KFloatArray _,KFunction _|KFloatArray _,KNull|KFloatArray _,KSymbol _|KIntegerArray _,KDictionary _|KIntegerArray _,KFunction _|KIntegerArray _,KNull|KIntegerArray _,KSymbol _|KSymbolArray _,KChar _|KSymbolArray _,KDictionary _|KSymbolArray _,KFloat _|KSymbolArray _,KFunction _|KSymbolArray _,KInteger _|KSymbolArray _, KNull ->
       KList (append (as_list x) [|y|])
+    (* t1-vector,t2-vector (t1!=t2) *)
     | KCharArray _,KFloatArray _|KCharArray _,KIntegerArray _| KCharArray _,KSymbolArray _|KFloatArray _,KCharArray _|KFloatArray _,KSymbolArray _|KIntegerArray _,KCharArray _|KIntegerArray _,KSymbolArray _|KSymbolArray _,KCharArray _|KSymbolArray _,KFloatArray _|KSymbolArray _,KIntegerArray _ ->
       KList (append (as_list x) (as_list y))
 let vcomma_m x = match x with (* enlist *)
@@ -613,11 +635,9 @@ let vcircumflex x y = match x,y with
     | KInteger x,KInteger y when y >= 0 -> KInteger (Int.pow x y)
     | KInteger x,KInteger y             -> KFloat ((Float.of_int x) ** (Float.of_int y))
     | _                                 -> raise (KError_type [x;y])
-let rec vcircumflex_m x = match x with
-    | KInteger _ | KChar _ | KFloat _ | KSymbol _ -> KIntegerArray [||]
-    | KList x -> vcomma (KIntegerArray [|Array.length x|]) (vcircumflex_m x.(0))
-    | KDictionary _ -> raise Not_implemented
-    | y -> KIntegerArray [|n y|]
+let rec vcircumflex_m x = KIntegerArray (shape x) (* shape *)
+
+
 let vcircumflex_av_mm av x = av_mm av vcircumflex_m x
 let vcircumflex_av_md av x = av_md av vcircumflex x
 let vcircumflex_av_dm av x y = av_dm av vcircumflex_m x y
@@ -750,7 +770,6 @@ let vquestion_av_mm av x = av_mm av vquestion_m x
 let vquestion_av_md av x = av_md av vquestion x
 let vquestion_av_dm av x y = av_dm av vquestion_m x y
 let vquestion_av_dd av x y = av_dd av vquestion x y
-(* let vat_op a i = if 0 < i && i < Array.length a then a.(i) else raise (KError_index [KInteger i]) *)
 let rec vat x y = match x,y with
   | KList x,         KInteger y      -> x.(y)
   | KIntegerArray x, KInteger y      -> KInteger x.(y)
