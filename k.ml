@@ -1118,6 +1118,7 @@ and parse_exp e t i : e =
   | Some e,               Some(TkBracketO,_),    _                       -> let j, a = parse_args t (i+1) in
                                                                             parse_exp (Some (match a with [x] -> EAppM(e,x) | [x;y] -> EAppD(x,e,y))) t (j+1)
   | Some (EId v),         Some(TkColon,_),       Some (_)                -> let e = parse_exp None t (i+1) in EAssign(v, e)
+  | Some (EId v),         Some(TkSpace,_),       Some(TkColon,_)         -> let e = parse_exp None t (i+2) in EAssign(v, e)
   | None,                 Some(TkAlpha,s),       _                       -> parse_exp (Some (EId (parse_id s))) t (i+1)
   | None,                 Some(TkBquote,_),      Some (TkAlpha,s)        -> parse_exp (Some (ESymbol (parse_symbol s))) t (i+2)
   | None,                 Some(TkBquote,_),      Some (TkDquote,_)       -> raise Not_implemented
