@@ -1,5 +1,6 @@
 open Core.Std
 (* page 108
+FIXME: the parser cases for verb/adverb/function applications are messy, require cleanup for clarity
 TODO: arbitrary function arity & (partial) application f[x;;z]
 TODO: parse (and represent) partial verb application (e.g. (3 +) )
 TODO: parse
@@ -16,12 +17,12 @@ X TODO: parse (and represent) variable names (alpha without bquote)
 X TODO: finish verbs (verb compositions (e.g. (%-)[a;b]))
 X TODO: finish basic adverbs (distinguish dyadic/monadic application of the verb, do adverb compositions)
 X TODO: parse lists (e.g. (a;b;c))
-OPT: optimize for ocamlc inlining (http://www.ocamlpro.com/blog/2013/05/24/optimisations-you-shouldn-t-do.html:
-  "functions containing structured constants or local functions are not allowed to be duplicated, preventing them from being inlined.")
 OPT: type tracking for list optimizations, e.g. (KList (TInteger,(KInteger x,KInteger y,KInteger z)) ~> KIntegerArray [|x,y,z|]
 OPT: constant folding for expressions e.g. (1,2,3,4) : EAppD(EInteger 1,VComma,EAppD(EInteger 2,VComma,....(,EInteger 4))) -> EIntegerArray [|1;2;3;4|]
 OPT: type (and shape) inference. likely necessary for simple JIT code as well as for performance
      edit: looks like someone already figured out most of the necessary framework http://dx.doi.org/10.1007/978-3-642-54833-8_3 :)
+OPT: optimize for ocamlc inlining (http://www.ocamlpro.com/blog/2013/05/24/optimisations-you-shouldn-t-do.html:
+  "functions containing structured constants or local functions are not allowed to be duplicated, preventing them from being inlined.")
 OPT: special-case some verb/adverb compositions to avoid a lot of array appends. for example ,//
 OPT: optimize constant enumerations, e.g. (100!) @ 10! is just 10!; (some-vector)@5! is just 5#(some-vector)
 OPT: add matrix types (KIntegerArray2, KFloatArray2)
@@ -208,6 +209,7 @@ let sub a pos len = Array.sub a ~pos ~len
 let mod_pos x y = if x < 0 then y+(x mod y) else x mod y
 let zip x y f = if Array.length x = Array.length y then Array.map2_exn x y ~f else raise (KError_length [])
 let map x f = Array.map x ~f
+let append x y = Array.append x y
 let take x y = let n = Array.length y in (Array.init (Int.abs x) ~f:(fun i -> y.(mod_pos i n)))
 let drop x y = let n = Array.length y in let p,l = if x >= 0 then x,n-x else 0,n+x in sub y p l
 let vec x = match is_vector (ts x) with (* vectorize a homogeneous list *)
@@ -216,9 +218,16 @@ let vec x = match is_vector (ts x) with (* vectorize a homogeneous list *)
   | Some TChar -> KCharArray (map x (function (KChar x) -> x | _ -> never()))
   | Some TSymbol -> KSymbolArray (map x (function (KSymbol x) -> x | _ -> never()))
   | _ -> KList x
+let as_list = function
+  | KIntegerArray x -> map x (fun x -> KInteger x)
+  | KFloatArray x -> map x (fun x -> KFloat x)
+  | KCharArray x -> map x (fun x -> KChar x)
+  | KSymbolArray x -> map x (fun x -> KSymbol x)
+  | KList x -> x
+  | x -> [|x|]
 let cut x y f = let n = Array.length y in
                 let p, a = Array.fold x ~init:(0,[]) ~f:(fun (p,xs) x -> (x,f (sub y p (x-p))::xs)) in
-                Array.of_list (List.rev ((f (sub y p (n-p))) :: a))
+                if p < n then Array.of_list_rev ((f (sub y p (n-p))) :: a) else Array.of_list_rev a
 let rec split_map f d m a i = if i+d > m then [] else f (sub a i d) :: split_map f d m a (i+d)
 let reshape_k x nx y ny =
     let px = Array.fold x ~init:1 ~f:( * ) in
@@ -238,7 +247,7 @@ let rot (x:int) (y:'a array) : 'a array =
       Array.blit ~src:y ~src_pos:0 ~dst:a ~dst_pos:k ~len:x; (*SLOW*)
       a
 
-let rec av_generic_dd av f x y : k = match av,x,y with (* f:dyad, derived verb:dyad *)
+let rec av_dd av f x y : k = match av,x,y with (* f:dyad, derived verb:dyad *)
   (* each *)
   | AVQuote,             KList x,         KList y          -> KList (zip x y f)
   | AVQuote,             KList x,         KIntegerArray y  -> KList (zip x y (fun x y -> f x (KInteger y)))
@@ -294,7 +303,7 @@ let rec av_generic_dd av f x y : k = match av,x,y with (* f:dyad, derived verb:d
   | AVForwardslash,      _,               KCharArray y     -> Array.fold_right ~init:x ~f:(fun y x -> f x (KChar y)) y
   | AVForwardslash,      _,               _                -> f x y
   | _ -> raise Not_implemented
-let av_generic_mm av f x = match av,x with (* f:monad, derived verb:monad *)
+let av_mm av f x = match av,x with (* f:monad, derived verb:monad *)
     (* (1/3) over-monad (f/ x) *)
     | AVForwardslash,_ -> let ix = x in let rec loop x = let fx = f x in if match_compare x fx || match_compare ix fx then fx else loop fx in loop ix
     (* (1/3) scan-monad (f\ x) *)
@@ -307,7 +316,7 @@ let av_generic_mm av f x = match av,x with (* f:monad, derived verb:monad *)
     | AVQuote, KCharArray x -> vec (map x (fun x -> f (KChar x)))
     | AVQuote, x -> f x
     | _ -> raise Not_implemented
-let av_generic_dm av f x y = match av, x, y with (* f:monad, derived verb:dyad *)
+let av_dm av f x y = match av, x, y with (* f:monad, derived verb:dyad *)
     (* (2/3) over-monad (n f/ x) *)
     | AVForwardslash, KInteger n, x when n >= 0 -> let rec loop x = function |0->x|n -> loop (f x) (n-1) in loop x n
     (* (3/3) over-monad (b f/ y) -- Need proper KFunction *)
@@ -317,7 +326,7 @@ let av_generic_dm av f x y = match av, x, y with (* f:monad, derived verb:dyad *
     (* (3/3) scan-monad (b f/ y) -- Need proper KFunction *)
     | AVBackslash, _, _ -> raise Not_implemented
     | _ -> raise Not_implemented
-let av_generic_md av f x = (* f:dyad, derived verb:monad *)
+let av_md av f x = (* f:dyad, derived verb:monad *)
     let app_pairs f g xs = let fs,_ = Array.fold (sub xs 1 ((Array.length xs)-1)) ~init:([],g xs.(0)) ~f:(fun (acc,x) y -> let y = g y in ((f y x)::acc,y))
                            in Array.of_list_rev fs
     in
@@ -339,6 +348,8 @@ let av_generic_md av f x = (* f:dyad, derived verb:monad *)
     | AVForwardslash, KList y          -> Array.reduce_exn ~f y
     | AVForwardslash, KIntegerArray y  -> Array.reduce_exn ~f:(fun x y -> f x y) (map y (fun x -> KInteger x))
     | AVForwardslash, KFloatArray y    -> Array.reduce_exn ~f:(fun x y -> f x y) (map y (fun x -> KFloat x))
+    | AVForwardslash, KSymbolArray y   -> Array.reduce_exn ~f:(fun x y -> f x y) (map y (fun x -> KSymbol x))
+    | AVForwardslash, KCharArray y     -> Array.reduce_exn ~f:(fun x y -> f x y) (map y (fun x -> KChar x))
     | AVForwardslash, _                -> raise (KError_type [x])
 
 let rec vplus x y = match x,y with
@@ -378,15 +389,15 @@ let vplus_m =
             | KList y -> y.(i)
             | y -> y))))))
     | x -> x
-let vplus_av_mm av x = av_generic_mm av vplus_m x
-let vplus_av_md av x = av_generic_md av vplus x
-let vplus_av_dm av x y = av_generic_dm av vplus_m x y
+let vplus_av_mm av x = av_mm av vplus_m x
+let vplus_av_md av x = av_md av vplus x
+let vplus_av_dm av x y = av_dm av vplus_m x y
 let vplus_av_dd av x y = match av,x,y with
   | AVForwardslash, KInteger x, KIntegerArray y -> KInteger (Array.fold y ~init:x ~f:(+))
   | AVForwardslash, KInteger x, KFloatArray y   -> KFloat (Array.fold y ~init:(Float.of_int x) ~f:(+.))
   | AVForwardslash, KFloat x,   KFloatArray y   -> KFloat (Array.fold y ~init:x ~f:(+.))
   | AVForwardslash, KFloat x,   KIntegerArray y -> KFloat (Array.fold (map y Float.of_int) ~init:x ~f:(+.))
-  | _ -> av_generic_dd av vplus x y
+  | _ -> av_dd av vplus x y
 let rec vminus x y = match x,y with
     | KInteger x,      KInteger y      -> KInteger (x-y)
     | KInteger x,      KIntegerArray y -> KIntegerArray (map y (fun y->y-x))
@@ -405,15 +416,15 @@ let rec vminus_m x = match x with
   | KFloatArray x   -> KFloatArray (map x (fun x -> 0.0-.x))
   | KList x         -> KList (map x vminus_m)
   | _ -> raise (KError_type [x])
-let vminus_av_mm av x = av_generic_mm av vminus_m x
-let vminus_av_md av x = av_generic_md av vminus x
-let vminus_av_dm av x y = av_generic_dm av vminus_m x y
+let vminus_av_mm av x = av_mm av vminus_m x
+let vminus_av_md av x = av_md av vminus x
+let vminus_av_dm av x y = av_dm av vminus_m x y
 let vminus_av_dd av x y = match av,x,y with
   | AVForwardslash, KInteger x, KIntegerArray y -> KInteger (Array.fold y ~init:x ~f:(-))
   | AVForwardslash, KInteger x, KFloatArray y   -> KFloat (Array.fold y ~init:(Float.of_int x) ~f:(-.))
   | AVForwardslash, KFloat x,   KFloatArray y   -> KFloat (Array.fold y ~init:x ~f:(-.))
   | AVForwardslash, KFloat x,   KIntegerArray y -> KFloat (Array.fold (map y Float.of_int) ~init:x ~f:(-.))
-  | _ -> av_generic_dd av vminus x y
+  | _ -> av_dd av vminus x y
 let rec vstar x y = match x,y with
     | KInteger _,      KList y         -> KList (map y (vstar x))
     | KList x,         KInteger _      -> KList (map x (fun x -> vstar x y))
@@ -439,10 +450,10 @@ let vstar_m x = match x with
     | KCharArray [||]    -> KChar ' '
     | KCharArray x       -> KChar x.(0)
     | x -> x
-let vstar_av_mm av x = av_generic_mm av vstar_m x
-let vstar_av_md av x = av_generic_md av vstar x
-let vstar_av_dm av x y = av_generic_dm av vstar_m x y
-let vstar_av_dd av x y = av_generic_dd av vstar x y
+let vstar_av_mm av x = av_mm av vstar_m x
+let vstar_av_md av x = av_md av vstar x
+let vstar_av_dm av x y = av_dm av vstar_m x y
+let vstar_av_dd av x y = av_dd av vstar x y
 let vexclaim x y = match x,y with
   | KIntegerArray x, KIntegerArray y -> KList (map x (fun i -> KIntegerArray (rot i y)))
   | KIntegerArray x, KFloatArray y   -> KList (map x (fun i -> KFloatArray (rot i y)))
@@ -459,12 +470,12 @@ let vexclaim_m = function
     | KInteger x when x > 0          -> KIntegerArray (Array.init x ~f:Fn.id)
     | KDictionary d                  -> KSymbolArray (Array.of_list (Hashtbl.keys d))
     | x -> raise (KError_type [x])
-let vexclaim_av_dm av x y = av_generic_dm av vexclaim_m x y
-let vexclaim_av_md av x = av_generic_md av vexclaim x
+let vexclaim_av_dm av x y = av_dm av vexclaim_m x y
+let vexclaim_av_md av x = av_md av vexclaim x
 let vexclaim_av_mm av x = match av,x with
     | AVQuote, KIntegerArray x    ->  KList (map x (fun n -> KIntegerArray (Array.init n ~f:Fn.id)))
     | _,x -> raise (KError_type [x])
-let vexclaim_av_dd av x y = av_generic_dd av vexclaim x y
+let vexclaim_av_dd av x y = av_dd av vexclaim x y
 let vpercent x y = match x,y with (* fsa, non-standard. (transitions: state x symbol -> state) % (input tape) ~> (state sequence) *)
   | KList x, KIntegerArray y ->
     let t = map x (function (KIntegerArray x) -> x |_ -> never()) in
@@ -479,10 +490,10 @@ let rec vpercent_m x = match x with
   | KList x -> KList (map x vpercent_m)
   | _ -> raise (KError_type [x])
 
-let vpercent_av_mm av x = av_generic_mm av vpercent_m x
-let vpercent_av_md av x = av_generic_md av vpercent x
-let vpercent_av_dm av x y = av_generic_dm av vpercent_m x y
-let vpercent_av_dd av x y = av_generic_dd av vpercent x y
+let vpercent_av_mm av x = av_mm av vpercent_m x
+let vpercent_av_md av x = av_md av vpercent x
+let vpercent_av_dm av x y = av_dm av vpercent_m x y
+let vpercent_av_dd av x y = av_dd av vpercent x y
 let rec vpipe x y = match x,y with
   | KInteger x,     KInteger y when x >= y -> KInteger x
   | KInteger _,     KInteger y             -> KInteger y
@@ -500,16 +511,16 @@ let rec vpipe x y = match x,y with
   | KSymbol x,      KSymbol y              -> KSymbol (if x >= y then x else y) (* FIXME: lexicographic comparison of symbols *)
   | _ -> raise (KError_type [x;y])
 let vpipe_m x = match x with
-   | KIntegerArray xs -> Array.rev_inplace xs; KIntegerArray xs
-   | KFloatArray xs -> Array.rev_inplace xs; KFloatArray xs
-   | KSymbolArray xs -> Array.rev_inplace xs; KSymbolArray xs
-   | KCharArray xs -> Array.rev_inplace xs; KCharArray xs
-   | KList xs -> Array.rev_inplace xs; KList xs
-   | x -> x
-let vpipe_av_mm av x = av_generic_mm av vpipe_m x
-let vpipe_av_md av x = av_generic_md av vpipe x
-let vpipe_av_dm av x y = av_generic_dm av vpipe_m x y
-let vpipe_av_dd av x y = av_generic_dd av vpipe x y
+   | KIntegerArray xs -> let a = Array.copy xs in Array.rev_inplace a; KIntegerArray a
+   | KFloatArray xs   -> let a = Array.copy xs in Array.rev_inplace a; KFloatArray a
+   | KSymbolArray xs  -> let a = Array.copy xs in Array.rev_inplace a; KSymbolArray a
+   | KCharArray xs    -> let a = Array.copy xs in Array.rev_inplace a; KCharArray a
+   | KList xs         -> let a = Array.copy xs in Array.rev_inplace a; KList a
+   | x                -> x
+let vpipe_av_mm av x = av_mm av vpipe_m x
+let vpipe_av_md av x = av_md av vpipe x
+let vpipe_av_dm av x y = av_dm av vpipe_m x y
+let vpipe_av_dd av x y = av_dd av vpipe x y
 let rec vampersand x y = match x,y with
   | KInteger x,     KInteger y when x <= y -> KInteger x
   | KInteger _,     KInteger y             -> KInteger y
@@ -531,60 +542,61 @@ let vampersand_m x = match x with
                        KIntegerArray a
   | _ -> raise (KError_type [x])
 
-let vampersand_av_mm av x = av_generic_mm av vampersand_m x
-let vampersand_av_md av x = av_generic_md av vampersand x
-let vampersand_av_dm av x y = av_generic_dm av vampersand_m x y
-let vampersand_av_dd av x y = av_generic_dd av vampersand x y
-let vcomma x y = match x,y with (* join *) (* SLOW *)
-    | KChar a,         KCharArray b    -> KCharArray (Array.append [|a|] b)
-    | KFloat a,        KFloatArray b   -> KFloatArray (Array.append [|a|] b)
-    | KInteger a,      KIntegerArray b -> KIntegerArray (Array.append [|a|] b)
-    | KSymbol a,       KSymbolArray b  -> KSymbolArray (Array.append [|a|] b)
-    | KCharArray a,    KChar b         -> KCharArray (Array.append a [|b|])
-    | KFloatArray a,   KFloat b        -> KFloatArray (Array.append a [|b|])
-    | KIntegerArray a, KInteger b      -> KIntegerArray (Array.append a [|b|])
-    | KSymbolArray a,  KSymbol b       -> KSymbolArray (Array.append a [|b|])
-    | KCharArray a,    KCharArray b    -> KCharArray (Array.append a b)
-    | KFloatArray a,   KFloatArray b   -> KFloatArray (Array.append a b)
-    | KFloatArray a,   KIntegerArray b -> KFloatArray (Array.append a (map b Float.of_int))
-    | KIntegerArray a, KIntegerArray b -> KIntegerArray (Array.append a b)
-    | KSymbolArray a,  KSymbolArray b  -> KSymbolArray (Array.append a b)
-    | KList [||],      KCharArray b    -> KCharArray b
-    | KList [||],      KFloatArray b   -> KFloatArray b
-    | KList [||],      KIntegerArray b -> KIntegerArray b
-    | KList [||],      KSymbolArray b  -> KSymbolArray b
-    | KList [||],      KChar b         -> KCharArray [|b|]
-    | KList [||],      KFloat b        -> KFloatArray [|b|]
-    | KList [||],      KInteger b      -> KIntegerArray [|b|]
-    | KList [||],      KSymbol b       -> KSymbolArray [|b|]
-    | KList a,         KList b         -> KList (Array.append a b)
-    | KChar x,         KChar y         -> KCharArray [|x;y|]
-    | KFloat x,        KFloat y        -> KFloatArray [|x;y|]
+let vampersand_av_mm av x = av_mm av vampersand_m x
+let vampersand_av_md av x = av_md av vampersand x
+let vampersand_av_dm av x y = av_dm av vampersand_m x y
+let vampersand_av_dd av x y = av_dd av vampersand x y
+let vcomma x y = match x,y with (* join *)
+    | KList x,         KList y         -> KList (append x y)
     | KInteger x,      KInteger y      -> KIntegerArray [|x;y|]
+    | KIntegerArray x, KIntegerArray y -> KIntegerArray (append x y)
+    | KFloat x,        KFloat y        -> KFloatArray [|x;y|]
+    | KFloatArray x,   KFloatArray y   -> KFloatArray (append x y)
+    | KChar x,         KChar y         -> KCharArray [|x;y|]
+    | KCharArray x,    KCharArray y    -> KCharArray (append x y)
     | KSymbol x,       KSymbol y       -> KSymbolArray [|x;y|]
-    | x,               KList y         -> KList (Array.append [|x|] y)
-    | KIntegerArray a, KCharArray b    -> KList (Array.append (map a (fun x -> KInteger x)) (map b (fun x -> KChar x)))
-    | KIntegerArray a, KFloatArray b   -> KList (Array.append (map a (fun x -> KInteger x)) (map b (fun x -> KFloat x)))
-    | KIntegerArray a, KIntegerArray b -> KList (Array.append (map a (fun x -> KInteger x)) (map b (fun x -> KInteger x)))
-    | KIntegerArray a, KSymbolArray b  -> KList (Array.append (map a (fun x -> KInteger x)) (map b (fun x -> KSymbol x)))
-    | KInteger a,      KSymbol b       -> KList [|KInteger a;KSymbol b|]
-    | KInteger a,      KCharArray b    -> KList (Array.append [|KInteger a|] (map b (fun x -> KChar x)))
-    | KInteger a,      KFloatArray b   -> KFloatArray (Array.append [|Float.of_int a|] b)
-    | KList a,         KIntegerArray b -> KList (Array.append a (map b (fun x -> KInteger x)))
-    | KList a,         KInteger b      -> KList (Array.append a [|KInteger b|])
-    | KList a,         KChar b         -> KList (Array.append a [|KChar b|])
-    | KIntegerArray a, y               -> KList (Array.append (map a (fun x -> KInteger x)) [|y|])
-    | KFloatArray a, KInteger b        -> KFloatArray (Array.append a [|Float.of_int b|])
-    | _ -> printf "%s,%s\n" (Sexp.to_string (sexp_of_k x)) (Sexp.to_string (sexp_of_k y));raise (KError_type [x;y])
+    | KSymbolArray x,  KSymbolArray y  -> KSymbolArray (append x y)
+    | KInteger x,      KIntegerArray y -> KIntegerArray (append [|x|] y)
+    | KIntegerArray x, KInteger y      -> KIntegerArray (append x [|y|])
+    | KFloat x,        KFloatArray y   -> KFloatArray (append [|x|] y)
+    | KFloatArray x,   KFloat y        -> KFloatArray (append x [|y|])
+    | KChar x,         KCharArray y    -> KCharArray (append [|x|] y)
+    | KCharArray x,    KChar y         -> KCharArray (append x [|y|])
+    | KSymbol x,       KSymbolArray y  -> KSymbolArray (append [|x|] y)
+    | KSymbolArray x,  KSymbol y       -> KSymbolArray (append x [|y|])
+    | KFloat x,        KInteger y      -> KFloatArray [|x;Float.of_int y|]
+    | KInteger x,      KFloat y        -> KFloatArray [|Float.of_int x;y|]
+    | KFloat x,        KIntegerArray y -> KFloatArray (append [|x|] (map y Float.of_int))
+    | KIntegerArray x, KFloat y        -> KFloatArray (append (map x Float.of_int) [|y|])
+    | KFloatArray x,   KInteger y      -> KFloatArray (append x [|Float.of_int y|])
+    | KInteger x,      KFloatArray y   -> KFloatArray (append [|Float.of_int x|] y)
+    | KFloatArray x,   KIntegerArray y -> KFloatArray (append x (map y Float.of_int))
+    | KIntegerArray x, KFloatArray y   -> KFloatArray (append (map x Float.of_int) y)
+    | KDictionary _,KDictionary _|KFunction _,KFunction _|KNull,KNull|KChar _,KFloat _|KFloat _,KChar _|KChar _,KInteger _|KInteger _,KChar _|KInteger _,KSymbol _|KSymbol _,KInteger _|KInteger _,KNull|KNull,KInteger _|KFloat _,KSymbol _|KSymbol _,KFloat _|KFloat _,KFunction _|KFunction _,KFloat _|KFloat _,KNull|KNull,KFloat _|KFunction _,KSymbol _|KSymbol _,KFunction _|KDictionary _,KInteger _|KInteger _,KDictionary _|KDictionary _,KFloat _|KFloat _,KDictionary _|KDictionary _,KSymbol _|KSymbol _,KDictionary _|KDictionary _,KFunction _|KFunction _,KDictionary _|KDictionary _,KNull|KNull,KDictionary _|KFunction _,KInteger _|KInteger _,KFunction _|KFunction _,KNull|KNull,KFunction _|KNull,KSymbol _|KSymbol _,KNull|KChar _,KSymbol _|KSymbol _,KChar _|KChar _,KDictionary _|KDictionary _,KChar _|KChar _,KFunction _|KFunction _,KChar _|KChar _,KNull|KNull,KChar _ ->
+      KList [|x;y|]
+    | KSymbol _,KList y|KNull,KList y|KInteger _,KList y|KFloat _,KList y|KChar _,KList y|KDictionary _,KList y|KFunction _,KList y ->
+      KList (append [|x|] y)
+    | KList x,KSymbol _| KList x,KNull| KList x,KInteger _| KList x,KFloat _| KList x,KChar _| KList x,KDictionary _ | KList x,KFunction _ ->
+      KList (append x [|y|])
+    | KList x,KSymbolArray _|KList x,KIntegerArray _|KList x,KFloatArray _ |KList x,KCharArray _ ->
+      KList (append x (as_list y))
+    | KSymbolArray _,KList y|KIntegerArray _,KList y|KFloatArray _,KList y|KCharArray _,KList y ->
+      KList (append (as_list x) y)
+    | KChar _,KFloatArray _|KChar _,KIntegerArray _|KChar _,KSymbolArray _|KDictionary _,KCharArray _|KDictionary _,KFloatArray _|KDictionary _,KIntegerArray _|KDictionary _,KSymbolArray _|KFloat _,KCharArray _|KFloat _,KSymbolArray _|KFunction _,KCharArray _|KFunction _,KFloatArray _|KFunction _,KIntegerArray _|KFunction _,KSymbolArray _|KInteger _,KCharArray _|KInteger _,KSymbolArray _|KIntegerArray _,KChar _|KNull,KCharArray _|KNull,KFloatArray _|KNull,KIntegerArray _|KNull,KSymbolArray _|KSymbol _,KCharArray _|KSymbol _,KIntegerArray _|KSymbol _,KFloatArray _ ->
+      KList (append [|x|] (as_list y))
+    | KCharArray _,KDictionary _|KCharArray _,KFloat _|KCharArray _,KFunction _|KCharArray _,KInteger _|KCharArray _,KNull|KCharArray _,KSymbol _|KFloatArray _,KChar _|KFloatArray _,KDictionary _|KFloatArray _,KFunction _|KFloatArray _,KNull|KFloatArray _,KSymbol _|KIntegerArray _,KDictionary _|KIntegerArray _,KFunction _|KIntegerArray _,KNull|KIntegerArray _,KSymbol _|KSymbolArray _,KChar _|KSymbolArray _,KDictionary _|KSymbolArray _,KFloat _|KSymbolArray _,KFunction _|KSymbolArray _,KInteger _|KSymbolArray _, KNull ->
+      KList (append (as_list x) [|y|])
+    | KCharArray _,KFloatArray _|KCharArray _,KIntegerArray _| KCharArray _,KSymbolArray _|KFloatArray _,KCharArray _|KFloatArray _,KSymbolArray _|KIntegerArray _,KCharArray _|KIntegerArray _,KSymbolArray _|KSymbolArray _,KCharArray _|KSymbolArray _,KFloatArray _|KSymbolArray _,KIntegerArray _ ->
+      KList (append (as_list x) (as_list y))
 let vcomma_m x = match x with (* enlist *)
-    |  KChar x    -> KCharArray [|x|]
-    |  KFloat x   -> KFloatArray [|x|]
-    |  KInteger x -> KIntegerArray [|x|]
-    |  KSymbol x  -> KSymbolArray [|x|]
+    | KChar x    -> KCharArray [|x|]
+    | KFloat x   -> KFloatArray [|x|]
+    | KInteger x -> KIntegerArray [|x|]
+    | KSymbol x  -> KSymbolArray [|x|]
     | x -> KList [|x|]
-let vcomma_av_mm av x = av_generic_mm av vcomma_m x
-let vcomma_av_md av x = av_generic_md av vcomma x
-let vcomma_av_dm av x y = av_generic_dm av vcomma_m x y
+let vcomma_av_mm av x = av_mm av vcomma_m x
+let vcomma_av_md av x = av_md av vcomma x
+let vcomma_av_dm av x y = av_dm av vcomma_m x y
 let vcomma_av_dd av x y = match av,x,y with
     | AVForwardslash, KCharArray x,   KCharArray y    -> let a = Array.append x y in Array.rev_inplace a; KCharArray a
     | AVForwardslash, KFloatArray x,  KFloatArray y   -> let a = Array.append x y in Array.rev_inplace a; KFloatArray a
@@ -596,7 +608,7 @@ let vcomma_av_dd av x y = match av,x,y with
     | AVForwardslash, KList [||],     KSymbolArray y  -> KSymbolArray y
     | AVForwardslash, KList [||],     KList y         -> KList y
     | AVForwardslash, KList x,        KList y         -> let a = Array.append x y in Array.rev_inplace a; KList a
-    | _ -> av_generic_dd av vcomma x y
+    | _ -> av_dd av vcomma x y
 let vcircumflex x y = match x,y with
     | KInteger x,KInteger y when y >= 0 -> KInteger (Int.pow x y)
     | KInteger x,KInteger y             -> KFloat ((Float.of_int x) ** (Float.of_int y))
@@ -606,10 +618,10 @@ let rec vcircumflex_m x = match x with
     | KList x -> vcomma (KIntegerArray [|Array.length x|]) (vcircumflex_m x.(0))
     | KDictionary _ -> raise Not_implemented
     | y -> KIntegerArray [|n y|]
-let vcircumflex_av_mm av x = av_generic_mm av vcircumflex_m x
-let vcircumflex_av_md av x = av_generic_md av vcircumflex x
-let vcircumflex_av_dm av x y = av_generic_dm av vcircumflex_m x y
-let vcircumflex_av_dd av x y = av_generic_dd av vcircumflex x y
+let vcircumflex_av_mm av x = av_mm av vcircumflex_m x
+let vcircumflex_av_md av x = av_md av vcircumflex x
+let vcircumflex_av_dm av x y = av_dm av vcircumflex_m x y
+let vcircumflex_av_dd av x y = av_dd av vcircumflex x y
 let rec vlangle x y = let lt f x y = if f x y < 0 then 1 else 0 in match x,y with
     | KChar x,         KChar y          -> KInteger (lt Char.compare x y)
     | KCharArray x,    KCharArray y     -> KIntegerArray (zip x y (lt Char.compare))
@@ -622,16 +634,16 @@ let rec vlangle x y = let lt f x y = if f x y < 0 then 1 else 0 in match x,y wit
     | KList x,         KList y          -> KList (zip x y vlangle)
     | _ -> raise (KError_type [x;y]) (* Not_implemented, actually *)
 let vlangle_m _ = raise Not_implemented (* < grade up *)
-let vlangle_av_mm av x = av_generic_mm av vlangle_m x
-let vlangle_av_md av x = av_generic_md av vlangle x
-let vlangle_av_dm av x y = av_generic_dm av vlangle_m x y
-let vlangle_av_dd av x y = av_generic_dd av vlangle x y
+let vlangle_av_mm av x = av_mm av vlangle_m x
+let vlangle_av_md av x = av_md av vlangle x
+let vlangle_av_dm av x y = av_dm av vlangle_m x y
+let vlangle_av_dd av x y = av_dd av vlangle x y
 let vrangle x y = vlangle y x
 let vrangle_m _ = raise Not_implemented (* > grade down *)
-let vrangle_av_mm av x = av_generic_mm av vrangle_m x
-let vrangle_av_md av x = av_generic_md av vrangle x
-let vrangle_av_dm av x y = av_generic_dm av vrangle_m x y
-let vrangle_av_dd av x y = av_generic_dd av vrangle x y
+let vrangle_av_mm av x = av_mm av vrangle_m x
+let vrangle_av_md av x = av_md av vrangle x
+let vrangle_av_dm av x y = av_dm av vrangle_m x y
+let vrangle_av_dd av x y = av_dd av vrangle x y
 let rec vequals x y = let eq f x y = if f x y then 1 else 0 in match x,y with
     | KChar x,         KChar y         -> KInteger (eq Char.equal x y)
     | KCharArray x,    KChar y         -> KIntegerArray (map x (eq Char.equal y))
@@ -643,12 +655,11 @@ let rec vequals x y = let eq f x y = if f x y then 1 else 0 in match x,y with
     | KSymbolArray x,  KSymbolArray y  -> KIntegerArray (zip x y (eq Symbol.equal))
     | _ -> raise (KError_type [x;y])
 let vequals_m _ = raise Not_implemented (* = group *)
-let vequals_av_mm av x = av_generic_mm av vequals_m x
-let vequals_av_md av x = av_generic_md av vequals x
-let vequals_av_dm av x y = av_generic_dm av vequals_m x y
-let vequals_av_dd av x y = av_generic_dd av vequals x y
+let vequals_av_mm av x = av_mm av vequals_m x
+let vequals_av_md av x = av_md av vequals x
+let vequals_av_dm av x y = av_dm av vequals_m x y
+let vequals_av_dd av x y = av_dd av vequals x y
 let vpound x y = match x,y with (* # take / reshape *)
-  | KInteger 0,      KSymbol s when Symbol.equal s root -> KSymbolArray [||]
   | KInteger 0,      KFloat 0.0      -> KFloatArray [||]
   | KInteger 0,      KFloat 0.0      -> KFloatArray [||]
   | KInteger 0,      KList _         -> KList [||]
@@ -668,10 +679,10 @@ let vpound x y = match x,y with (* # take / reshape *)
   | KIntegerArray x, KFloatArray y   -> reshape_v x y (fun a -> KFloatArray a)
   | _ -> raise Not_implemented
 let vpound_m x = KInteger (n x)
-let vpound_av_mm av x = av_generic_mm av vpound_m x
-let vpound_av_md av x = av_generic_md av vpound x
-let vpound_av_dm av x y = av_generic_dm av vpound_m x y
-let vpound_av_dd av x y = av_generic_dd av vpound x y
+let vpound_av_mm av x = av_mm av vpound_m x
+let vpound_av_md av x = av_md av vpound x
+let vpound_av_dm av x y = av_dm av vpound_m x y
+let vpound_av_dd av x y = av_dd av vpound x y
 let vlodash x y = match x,y with
   | KInteger _,      KList [||]         -> y
   | KInteger _,      KCharArray [||]    -> y
@@ -690,16 +701,16 @@ let vlodash x y = match x,y with
   | KIntegerArray x, KFloatArray y      -> KList (cut x y (fun a -> KFloatArray a))
   | _ -> raise Not_implemented
 let rec vlodash_m = function
-    | KInteger x      -> KInteger x
-    | KFloat x        -> KInteger (Int.of_float (Float.round_down x))
-    | KIntegerArray x -> KIntegerArray x
-    | KFloatArray x   -> KIntegerArray (map x (Fn.compose Int.of_float Float.round_down))
-    | KList x         -> KList (map x vlodash_m)
-    | x               -> raise (KError_type [x])
-let vlodash_av_mm av x = av_generic_mm av vlodash_m x
-let vlodash_av_md av x = av_generic_md av vlodash x
-let vlodash_av_dm av x y = av_generic_dm av vlodash_m x y
-let vlodash_av_dd av x y = av_generic_dd av vlodash x y
+  | KInteger x      -> KInteger x
+  | KFloat x        -> KInteger (Int.of_float (Float.round_down x))
+  | KIntegerArray x -> KIntegerArray x
+  | KFloatArray x   -> KIntegerArray (map x (Fn.compose Int.of_float Float.round_down))
+  | KList x         -> KList (map x vlodash_m)
+  | x               -> raise (KError_type [x])
+let vlodash_av_mm av x = av_mm av vlodash_m x
+let vlodash_av_md av x = av_md av vlodash x
+let vlodash_av_dm av x y = av_dm av vlodash_m x y
+let vlodash_av_dd av x y = av_dd av vlodash x y
 let vtilde x y = KInteger (match_compare_int x y)
 let rec vtilde_m x = match x with
   | KInteger _      -> vtilde x (KInteger 0)
@@ -708,16 +719,16 @@ let rec vtilde_m x = match x with
   | KFloatArray x   -> KIntegerArray (map x (match_compare_int 0.0))
   | KList x         -> KList (map x vtilde_m)
   | _               -> raise (KError_type [x])
-let vtilde_av_mm av x = av_generic_mm av vtilde_m x
-let vtilde_av_md av x = av_generic_md av vtilde x
-let vtilde_av_dm av x y = av_generic_dm av vtilde_m x y
-let vtilde_av_dd av x y = av_generic_dd av vtilde x y
+let vtilde_av_mm av x = av_mm av vtilde_m x
+let vtilde_av_md av x = av_md av vtilde x
+let vtilde_av_dm av x y = av_dm av vtilde_m x y
+let vtilde_av_dd av x y = av_dd av vtilde x y
 let vdollar _ _ = raise Not_implemented (* $ format *)
 let vdollar_m _ = raise Not_implemented (* $ format *)
-let vdollar_av_mm av x = av_generic_mm av vdollar_m x
-let vdollar_av_md av x = av_generic_md av vdollar x
-let vdollar_av_dm av x y = av_generic_dm av vdollar_m x y
-let vdollar_av_dd av x y = av_generic_dd av vdollar x y
+let vdollar_av_mm av x = av_mm av vdollar_m x
+let vdollar_av_md av x = av_md av vdollar x
+let vdollar_av_dm av x y = av_dm av vdollar_m x y
+let vdollar_av_dd av x y = av_dd av vdollar x y
 let vquestion x y =
     let find x y = KInteger (match (Array.findi x ~f:(fun _ -> match_compare y)) with
     | Some (i,_) -> i
@@ -735,41 +746,41 @@ let vquestion_m x = match x with
   | KSymbolArray x -> KSymbolArray (Array.of_list (List.dedup (Array.to_list x))) (* SLOW *)
   | KCharArray x   -> KCharArray (Array.of_list (List.dedup (Array.to_list x))) (* SLOW *)
   | _ ->  raise (KError_rank [x])
-let vquestion_av_mm av x = av_generic_mm av vquestion_m x
-let vquestion_av_md av x = av_generic_md av vquestion x
-let vquestion_av_dm av x y = av_generic_dm av vquestion_m x y
-let vquestion_av_dd av x y = av_generic_dd av vquestion x y
+let vquestion_av_mm av x = av_mm av vquestion_m x
+let vquestion_av_md av x = av_md av vquestion x
+let vquestion_av_dm av x y = av_dm av vquestion_m x y
+let vquestion_av_dd av x y = av_dd av vquestion x y
 (* let vat_op a i = if 0 < i && i < Array.length a then a.(i) else raise (KError_index [KInteger i]) *)
 let rec vat x y = match x,y with
-    | KList x,         KInteger y      -> x.(y)
-    | KIntegerArray x, KInteger y      -> KInteger x.(y)
-    | KFloatArray x,   KInteger y      -> KFloat x.(y)
-    | KCharArray x,    KInteger y      -> KChar x.(y)
-    | KSymbolArray x,  KInteger y      -> KSymbol x.(y)
-    | KList x,         KIntegerArray y -> KList (map y (fun y -> x.(y)))
-    | KIntegerArray x, KIntegerArray y -> KIntegerArray (map y (fun y -> x.(y)))
-    | KFloatArray x,   KIntegerArray y -> KFloatArray (map y (fun y -> x.(y)))
-    | KCharArray x,    KIntegerArray y -> KCharArray (map y (fun y -> x.(y)))
-    | KSymbolArray x,  KIntegerArray y -> KSymbolArray (map y (fun y -> x.(y)))
-    | KIntegerArray _, KList y         -> KList (map y (vat x))
-    | KFloatArray _,   KList y         -> KList (map y (vat x))
-    | KCharArray _,    KList y         -> KList (map y (vat x))
-    | KSymbolArray _,  KList y         -> KList (map y (vat x))
-    | KDictionary x,   KSymbol y       -> Symbol.Table.find_exn x y
-    | KDictionary x,   KSymbolArray y  -> KList (map y (Symbol.Table.find_exn x))
-    | KDictionary _,   KList y         -> KList (map y (vat x))
-    | _                                -> raise (KError_type [x;y])
+  | KList x,         KInteger y      -> x.(y)
+  | KIntegerArray x, KInteger y      -> KInteger x.(y)
+  | KFloatArray x,   KInteger y      -> KFloat x.(y)
+  | KCharArray x,    KInteger y      -> KChar x.(y)
+  | KSymbolArray x,  KInteger y      -> KSymbol x.(y)
+  | KList x,         KIntegerArray y -> KList (map y (fun y -> x.(y)))
+  | KIntegerArray x, KIntegerArray y -> KIntegerArray (map y (fun y -> x.(y)))
+  | KFloatArray x,   KIntegerArray y -> KFloatArray (map y (fun y -> x.(y)))
+  | KCharArray x,    KIntegerArray y -> KCharArray (map y (fun y -> x.(y)))
+  | KSymbolArray x,  KIntegerArray y -> KSymbolArray (map y (fun y -> x.(y)))
+  | KIntegerArray _, KList y         -> KList (map y (vat x))
+  | KFloatArray _,   KList y         -> KList (map y (vat x))
+  | KCharArray _,    KList y         -> KList (map y (vat x))
+  | KSymbolArray _,  KList y         -> KList (map y (vat x))
+  | KDictionary x,   KSymbol y       -> Symbol.Table.find_exn x y
+  | KDictionary x,   KSymbolArray y  -> KList (map y (Symbol.Table.find_exn x))
+  | KDictionary _,   KList y         -> KList (map y (vat x))
+  | _                                -> raise (KError_type [x;y])
 let vat_m _ = raise Not_implemented
-let vat_av_mm av x = av_generic_mm av vat_m x
-let vat_av_md av x = av_generic_md av vat x
-let vat_av_dm av x y = av_generic_dm av vat_m x y
-let vat_av_dd av x y = av_generic_dd av vat x y
+let vat_av_mm av x = av_mm av vat_m x
+let vat_av_md av x = av_md av vat x
+let vat_av_dm av x y = av_dm av vat_m x y
+let vat_av_dd av x y = av_dd av vat x y
 let rec vdot x y = match x,y with
-    | KList _, KIntegerArray y     -> Array.fold y ~init:x ~f:(fun x i -> vdot x (KInteger i))
-    | _,       KList [|_|]         -> vat x y
-    | _,       KIntegerArray [|_|] -> vat x y
-    | _,       KInteger y          -> vat x (KInteger y)
-    | _                            -> raise Not_implemented
+  | KList _, KIntegerArray y     -> Array.fold y ~init:x ~f:(fun x i -> vdot x (KInteger i))
+  | _,       KList [|_|]         -> vat x y
+  | _,       KIntegerArray [|_|] -> vat x y
+  | _,       KInteger y          -> vat x (KInteger y)
+  | _                            -> raise Not_implemented
 let vdot_m x = match x with
   | KSymbol s -> lookup (lookup_symbol s)
   | KList x -> let d = dict () in
@@ -785,10 +796,10 @@ let vdot_m x = match x with
       |> List.map ~f:(fun (s,k) -> KList [|KSymbol s;k|])
       |> Array.of_list)
   | _ -> raise (KError_type [x])
-let vdot_av_mm av x = av_generic_mm av vdot_m x
-let vdot_av_md av x = av_generic_md av vdot x
-let vdot_av_dm av x y = av_generic_dm av vdot_m x y
-let vdot_av_dd av x y = av_generic_dd av vdot x y
+let vdot_av_mm av x = av_mm av vdot_m x
+let vdot_av_md av x = av_md av vdot x
+let vdot_av_dm av x y = av_dm av vdot_m x y
+let vdot_av_dd av x y = av_dd av vdot x y
 let eid = lookup
 let eassign v x =
   let d, s = match v with
@@ -806,7 +817,7 @@ let rec ed f : k -> k -> k =
     let f = match e f with KFunction f -> f | f -> raise (KError_type [f]) in
     match f with
     | F2 e -> exy e
-    | F e -> (match e with
+    | F _e -> (match _e with
     | EVerb VPlus -> vplus
     | EAdverb (av,EVerb VPlus) -> vplus_av_dd av
     | EAdverb (av,EAdverb(AVColon,EVerb VPlus)) -> vplus_av_dm av
@@ -864,7 +875,10 @@ let rec ed f : k -> k -> k =
     | EVerb VComma -> vcomma
     | EAdverb (av,EVerb VComma) -> vcomma_av_dd av
     | EAdverb (av,EAdverb(AVColon,EVerb VComma)) -> vcomma_av_dm av
-    | EAdverb (av,e) -> av_generic_dd av (ed e)
+    | EAdverb (av,EId id) -> let KFunction f = e (EId id) in ed (EAdverb(av,EFunction f)) (* FIXME *)
+    | EAdverb (av,EFunction (F1 f)) -> av_dm av (em f)
+    | EAdverb (av,EFunction (F2 f)) -> av_dd av (ed f)
+    | EAdverb (av,e) -> av_dd av (ed e)
     | _ -> raise Not_implemented)
    | _ -> raise Not_implemented
 and em f : k -> k =
@@ -930,9 +944,9 @@ and em f : k -> k =
     | EAdverb (av,EVerb VComma) -> vcomma_av_md av
     | EAdverb (av,EAdverb(AVColon,EVerb VComma)) -> vcomma_av_mm av
     | EAdverb (av,EId id) -> let KFunction f = e (EId id) in em (EAdverb(av,EFunction f)) (* FIXME *)
-    | EAdverb (av,EFunction (F1 f)) -> av_generic_mm av (em (EFunction (F1 f))) (* FIXME *)
-    | EAdverb (av,EFunction (F2 f)) -> av_generic_md av (ed (EFunction (F2 f))) (* FIXME *)
-    | EAdverb (av,e) -> av_generic_mm av (em e)
+    | EAdverb (av,EFunction (F1 f)) -> av_mm av (em (EFunction (F1 f))) (* FIXME *)
+    | EAdverb (av,EFunction (F2 f)) -> av_md av (ed (EFunction (F2 f))) (* FIXME *)
+    | EAdverb (av,e) -> av_mm av (em e)
     | _ -> raise Not_implemented)
    | _ -> raise Not_implemented
 and e _e = match _e with
@@ -968,7 +982,7 @@ and exy _e x' y' = match _e with
     | EList es -> KList (Array.map es ~f:(fun x -> exy x x' y'))
     | _ -> e _e
 
-(* parsing k.
+(* parsing k. still very sketchy.
   > step 1: make it work.
     step 2: make it short.
     step 3: make it fast. *)
@@ -1027,7 +1041,7 @@ let rec parse_adverb_composition e t i = match lookahead t i, lookahead t (i+1) 
   | Some (TkForwardslash,_), Some(TkColon,_) -> parse_adverb_composition (EAdverb(AVForwardslashColon,e)) t (i+2)
   | Some (TkForwardslash,_), _               -> parse_adverb_composition (EAdverb(AVForwardslash,e)) t (i+1)
   | Some (TkSquote,_),       Some(TkColon,_) -> parse_adverb_composition (EAdverb(AVQuoteColon,e)) t (i+2)
-  | Some (TkSquote,_),       _               -> parse_adverb_composition (EAdverb(AVForwardslash,e)) t (i+1)
+  | Some (TkSquote,_),       _               -> parse_adverb_composition (EAdverb(AVQuote,e)) t (i+1)
   | Some (TkColon,_),        _               -> parse_adverb_composition (EAdverb(AVColon,e)) t (i+1)
   | Some _,                  _               -> i,e
   | None,                    _               -> i,e
@@ -1039,6 +1053,15 @@ let rec parse_string t i = let rec loop j acc =
     | Some (_,cs),       _   -> loop (j+1) ((List.rev cs)@acc)
     | None,              _   -> raise KError_syntax
   in loop i []
+and parse_nested o c t i =
+  let rec loop j p =
+    if p = 0 then j,(sub t i (j-i-1))
+    else match lookahead t j with
+    | Some (c',_) when c=c' -> loop (j+1) (p-1)
+    | Some (o',_) when o=o' -> loop (j+1) (p+1)
+    | Some _                -> loop (j+1) p
+    | None                  -> raise KError_syntax
+  in loop i 1
 and parse_list t i =
   let rec loop acc last j p =
     match p,lookahead t j,last with
@@ -1062,83 +1085,63 @@ and parse_args t i =
     | 0,Some (TkSemicolon,_), Some k -> loop ((parse_exp None (sub t (k+1) (j-k-1)) 0)::acc) (Some j) (j+1) p
     | _,Some _, _                    -> loop acc last (j+1) p
   in j,loop [] None 0 0
-and parse_nested o c t i =
-  let rec loop j p =
-    if p = 0 then j,(sub t i (j-i-1))
-    else match lookahead t j with
-    | Some (c',_) when c=c' -> loop (j+1) (p-1)
-    | Some (o',_) when o=o' -> loop (j+1) (p+1)
-    | Some _                -> loop (j+1) p
-    | None                  -> raise KError_syntax
-  in loop i 1
-and parse_paren t i =
-  let rec loop j p =
-    if p = 0 then j,parse_list (sub t i (j-i-1)) 0
-    else match lookahead t j with
-    | Some (TkParenC,_) -> loop (j+1) (p-1)
-    | Some (TkParenO,_) -> loop (j+1) (p+1)
-    | Some _            -> loop (j+1) p
-    | None              -> raise KError_syntax
-  in loop i 1
+and parse_paren t i = let j,a = parse_nested TkParenO TkParenC t i in j,parse_list a 0
 and parse_num t = let s = String.of_char_list t in try EInteger (Int.of_string s) with _ -> EFloat (Float.of_string s)
 and parse_fun t i = let j,t = parse_nested TkBraceO TkBraceC t i in let e = parse_exp None t 0 in match nvars e with
-  | 1 -> j, F1 e
-  | 2 -> j, F2 e
+  | 1 -> j, F1 e | 2 -> j, F2 e | _ -> raise Not_implemented
 and parse_exp e t i : e =
   match e,lookahead t i,lookahead t (i+1) with
-  | None,                 Some(TkSpace,_),     Some (TkForwardslash,_)
-  | None,                 None,                None                    -> ENull
-  | Some e,               Some(TkSpace,_),     Some (TkForwardslash,_)
-  | Some e,               None,                None                    -> e
-  | None,                 Some(TkBraceO,_),    _                       -> let i,f = parse_fun t (i+1) in parse_exp (Some (EFunction f)) t i
-  | Some e,               Some(TkBracketO,_),  _                       -> let j, a = parse_args t (i+1) in
-                                                                          parse_exp (Some (match a with [x] -> EAppM(e,x) | [x;y] -> EAppD(x,e,y))) t (j+1)
-  | Some (EId v),         Some(TkColon,_),     Some (_)                -> let e = parse_exp None t (i+1) in EAssign(v, e)
-  | None,                 Some(TkAlpha,s),     _                       -> parse_exp (Some (EId (parse_id s))) t (i+1)
-  | None,                 Some(TkBquote,_),    Some (TkAlpha,s)        -> parse_exp (Some (ESymbol (parse_symbol s))) t (i+2)
-  | None,                 Some(TkBquote,_),    Some (TkDquote,_)       -> raise Not_implemented
-  | None,                 Some(TkBquote,_),    _                       -> parse_exp (Some (ESymbol root)) t (i+1)
-  | None,                 Some(TkParenO,_),    Some (TkParenC,_)       -> parse_exp (Some (EList [||])) t (i+2)
-  | None,                 Some(TkParenO,_),    _                       -> let i,e = parse_paren t (i+1) in parse_exp (Some e) t i
-  | None,                 Some(TkDquote,_),    _                       -> let i,e = parse_string t (i+1) in parse_exp (Some e) t i
-  | Some e,               Some(TkAlpha,s),     Some (TkBackslash,_)
-  | Some e,               Some(TkAlpha,s),     Some (TkForwardslash,_)
-  | Some e,               Some(TkAlpha,s),     Some (TkSquote,_)
-  | Some e,               Some(TkAlpha,s),     Some (TkColon,_)        -> let i,f = parse_adverb_composition (EId (parse_id s)) t (i+1) in
-                                                                          EAppD(e,f,parse_exp None t i)
-  | Some e,               Some(TkAlpha,s)      ,_                      -> EAppD(e,EId(parse_id s),parse_exp None t (i+1))
-  | Some e,               Some(TkVerb,[c]),    Some (TkBackslash,_)
-  | Some e,               Some(TkVerb,[c]),    Some (TkForwardslash,_)
-  | Some e,               Some(TkVerb,[c]),    Some (TkSquote,_)
-  | Some e,               Some(TkVerb,[c]),    Some (TkColon,_)        -> let i,f = parse_adverb_composition (EVerb (parse_verb c)) t (i+1) in
-                                                                          EAppD(e,f,parse_exp None t i)
-  | _,                    Some(TkVerb,_),      Some (TkColon,_)        -> raise Not_implemented
-  | Some e,               Some(TkVerb,[c])     ,_                      -> EAppD(e,EVerb (parse_verb c),parse_exp None t (i+1))
-  | Some e,               Some(TkDot,_)        ,_                      -> EAppD(e,EVerb VDot,parse_exp None t (i+1))
-  | Some e,               Some(TkLodash,_)     ,_                      -> EAppD(e,EVerb VLodash,parse_exp None t (i+1))
-  | None,                 Some(TkVerb,[c]),    Some (TkBackslash,_)
-  | None,                 Some(TkVerb,[c]),    Some (TkForwardslash,_)
-  | None,                 Some(TkVerb,[c]),    Some (TkSquote,_)
-  | None,                 Some(TkVerb,[c]),    Some (TkColon,_)        -> let i,f = parse_adverb_composition (EVerb (parse_verb c)) t (i+1) in
-                                                                          EAppM(f,parse_exp None t i)
-  | None,                 Some(TkVerb,[c]),    _                       -> EAppM(EVerb (parse_verb c),parse_exp None t (i+1))
-  | None,                 Some(TkDot,_),       _                       -> EAppM(EVerb VDot,parse_exp None t (i+1))
-  | None,                 Some(TkLodash,_),    _                       -> EAppM(EVerb VLodash,parse_exp None t (i+1))
+  | None,                 Some(TkSpace,_),       Some (TkForwardslash,_)
+  | None,                 None,                  None                    -> ENull
+  | Some e,               Some(TkSpace,_),       Some (TkForwardslash,_)
+  | Some e,               None,                  None                    -> e
+  | None,                 Some(TkBraceO,_),      _                       -> let i,f = parse_fun t (i+1) in parse_exp (Some (EFunction f)) t i
+  | Some e,               Some(TkBracketO,_),    _                       -> let j, a = parse_args t (i+1) in
+                                                                            parse_exp (Some (match a with [x] -> EAppM(e,x) | [x;y] -> EAppD(x,e,y))) t (j+1)
+  | Some (EId v),         Some(TkColon,_),       Some (_)                -> let e = parse_exp None t (i+1) in EAssign(v, e)
+  | None,                 Some(TkAlpha,s),       _                       -> parse_exp (Some (EId (parse_id s))) t (i+1)
+  | None,                 Some(TkBquote,_),      Some (TkAlpha,s)        -> parse_exp (Some (ESymbol (parse_symbol s))) t (i+2)
+  | None,                 Some(TkBquote,_),      Some (TkDquote,_)       -> raise Not_implemented
+  | None,                 Some(TkBquote,_),      Some (TkSpace,_)
+  | None,                 Some(TkBquote,_),      None                    -> parse_exp (Some (ESymbol root)) t (i+1)
+  | None,                 Some(TkParenO,_),      Some (TkParenC,_)       -> parse_exp (Some (EList [||])) t (i+2)
+  | None,                 Some(TkParenO,_),      _                       -> let i,e = parse_paren t (i+1) in parse_exp (Some e) t i
+  | None,                 Some(TkDquote,_),      _                       -> let i,e = parse_string t (i+1) in parse_exp (Some e) t i
+  | Some e,               Some(TkAlpha,s),       _                       -> let i,f = parse_adverb_composition (EId (parse_id s)) t (i+1) in
+                                                                            EAppD(e,f,parse_exp None t i)
+  | Some e,               Some(TkVerb,[c]),      _                       -> let i,f = parse_adverb_composition (EVerb (parse_verb c)) t (i+1) in
+                                                                            EAppD(e,f,parse_exp None t i)
+  | Some e,               Some(TkVerb,[c]),      _                       -> EAppD(e,EVerb (parse_verb c),parse_exp None t (i+1))
+  | Some e,               Some(TkDot,_) ,        _                       -> EAppD(e,EVerb VDot,parse_exp None t (i+1))
+  | Some e,               Some(TkLodash,_) ,     _                       -> let i,f = parse_adverb_composition (EVerb VLodash) t (i+1) in
+                                                                            EAppD(e,f,parse_exp None t i)
+  | None,                 Some(TkVerb,[c]),      _                       -> let i,f = parse_adverb_composition (EVerb (parse_verb c)) t (i+1) in
+                                                                            (match lookahead t i with None -> f | _ -> EAppM(f,parse_exp None t i))
+  | None,                 Some(TkDot,_),         _                       -> let i,f = parse_adverb_composition (EVerb VDot) t (i+1) in
+                                                                            (match lookahead t i with None -> f | _ -> EAppM(f,parse_exp None t i))
+  | None,                 Some(TkLodash,_),      _                       -> let i,f = parse_adverb_composition (EVerb VLodash) t (i+1) in
+                                                                            (match lookahead t i with None -> f | _ -> EAppM(f,parse_exp None t i))
+  | Some (EId v),         Some(TkSpace,_),       _                       -> let i,f = parse_adverb_composition (EId v) t (i+1) in
+                                                                            (match lookahead t i with None -> f | _ -> EAppM(f,parse_exp None t i))
   | Some e,               Some(TkBackslash,_),   None
   | Some e,               Some(TkForwardslash,_),None
   | Some e,               Some(TkSquote,_),      None
-  | Some e,               Some(TkColon,_),       None                  -> let i,f = parse_adverb_composition e t i in parse_exp (Some f) t i
+  | Some e,               Some(TkColon,_),       None                    -> let i,f = parse_adverb_composition e t i in parse_exp (Some f) t i
   | Some e,               Some(TkBackslash,_),   _
   | Some e,               Some(TkForwardslash,_),_
   | Some e,               Some(TkSquote,_),      _
-  | Some e,               Some(TkColon,_),       _                     -> let i,f = parse_adverb_composition e t i in EAppM(f,parse_exp None t i)
-  | None,                 Some(TkNum,num),     _                       -> parse_exp (Some (parse_num num)) t (i+1)
-  | Some(EInteger k),     Some(TkSpace,_),     Some(TkNum,num)         -> parse_exp (Some (append_earray (EIntegerArray [|k|]) (parse_num num))) t (i+2)
-  | Some(EFloat k),       Some(TkSpace,_),     Some(TkNum,num)         -> parse_exp (Some (append_earray (EFloatArray [|k|]) (parse_num num))) t (i+2)
-  | Some(EIntegerArray k),Some(TkSpace,_),     Some(TkNum,num)         -> parse_exp (Some (append_earray (EIntegerArray k) (parse_num num))) t (i+2)
-  | Some(EFloatArray k),  Some(TkSpace,_),     Some(TkNum,num)         -> parse_exp (Some (append_earray (EFloatArray k) (parse_num num))) t (i+2)
-  | e,                    Some(TkSpace,_),     _                       -> parse_exp e t (i+1)
-  | a,                    b,                   c                       -> raise (Parse_exn (a,b,c))
+  | Some e,               Some(TkColon,_),       _                       -> let i,f = parse_adverb_composition e t i in
+                                                                            (match lookahead t i with None -> f | _ -> EAppM(f,parse_exp None t i))
+  | None,                 Some(TkNum,num),       _                       -> parse_exp (Some (parse_num num)) t (i+1)
+  | Some(ESymbol k),      Some(TkBquote,_),      Some(TkAlpha, s)        -> parse_exp (Some (ESymbolArray [|k;parse_symbol s|])) t (i+2)
+  | Some(ESymbol k),      Some(TkSpace,_),       Some(TkBquote,_)        -> parse_exp (Some (ESymbolArray [|k|])) t (i+1)
+  | Some(ESymbolArray k), Some(TkBquote,_),      Some(TkAlpha, s)        -> parse_exp (Some (ESymbolArray (Array.append k [|parse_symbol s|]))) t (i+2)
+  | Some(EInteger k),     Some(TkSpace,_),       Some(TkNum,num)         -> parse_exp (Some (append_earray (EIntegerArray [|k|]) (parse_num num))) t (i+2)
+  | Some(EFloat k),       Some(TkSpace,_),       Some(TkNum,num)         -> parse_exp (Some (append_earray (EFloatArray [|k|]) (parse_num num))) t (i+2)
+  | Some(EIntegerArray k),Some(TkSpace,_),       Some(TkNum,num)         -> parse_exp (Some (append_earray (EIntegerArray k) (parse_num num))) t (i+2)
+  | Some(EFloatArray k),  Some(TkSpace,_),       Some(TkNum,num)         -> parse_exp (Some (append_earray (EFloatArray k) (parse_num num))) t (i+2)
+  | e,                    Some(TkSpace,_),       _                       -> parse_exp e t (i+1)
+  | a,                    b,                     c                       -> raise (Parse_exn (a,b,c))
 
 
 let i1 x = (printf "EVAL %s\n" (Sexp.to_string_hum (sexp_of_e x)); printf "%s\n\n" (Sexp.to_string_hum (sexp_of_k (e x))); flush_all())
@@ -1146,7 +1149,11 @@ let i () =
     let print_expr e = printf "%s\n" (Sexp.to_string_hum (sexp_of_e e)) in
     let print_tks tks =  () in (* printf "%s\n" (Sexp.to_string_hum @@ sexp_of_tks tks) in *)
     let rec loop () = printf "k) ";flush_all ();match In_channel.input_line ~fix_win_eol:true stdin with
-    | Some s -> (try let tks = tokenize s in print_tks tks; let e = parse_exp None tks 0 in i1 e with e -> printf "'error \"%s\"\n" (Sexp.to_string_hum (sexp_of_exn e)));
+    | Some s -> (
+                  (* try  *)
+                    let tks = tokenize s in print_tks tks; let e = parse_exp None tks 0 in i1 e
+                 (* with e -> printf "'error \"%s\"\n" (Sexp.to_string_hum (sexp_of_exn e)) *)
+                 );
                 loop ();
     | None -> ()
   in loop ()
