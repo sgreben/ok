@@ -1,6 +1,8 @@
 open Core.Std
 (* page 108
 FIXME: the parser cases for verb/adverb/function applications are messy, require cleanup for clarity
+FIXME: to parse sequential statements (e.g. a:10;b:a+1) we need to put each statement in parentheses
+       (otherwise it's interpreted as a:(10;b:a+1), yielding an incorrect value for a)
 TODO: parse (and represent) partial verb application (e.g. (3 +) )
 TODO: parse
 TODO: proper equality tests for floats (tolerance), remove all polymorphic eq tests
@@ -105,6 +107,8 @@ and  e = EAppD of e*e*e
        | EId of id
        | EAssign of id*e
        | EReturn of e
+       | ESeq of e*e
+       | EIf of e*e*e
        | ENull
        with sexp
 type t = TList
@@ -353,10 +357,10 @@ let av_md av f x = (* f:dyad, derived verb:monad *)
     | AVQuoteColon, KFloatArray [||]   -> raise (KError_length [x])
     | AVQuoteColon, KCharArray [||]    -> raise (KError_length [x])
     | AVQuoteColon, KList x            -> vec (app_pairs f Fn.id x)
-    | AVQuoteColon, KSymbolArray x     ->  vec (app_pairs f (fun x -> KSymbol x) x)
-    | AVQuoteColon, KIntegerArray x    ->  vec (app_pairs f (fun x -> KInteger x) x)
-    | AVQuoteColon, KFloatArray x      ->  vec (app_pairs f (fun x -> KFloat x) x)
-    | AVQuoteColon, KCharArray x       ->  vec (app_pairs f (fun x -> KChar x) x)
+    | AVQuoteColon, KSymbolArray x     -> vec (app_pairs f (fun x -> KSymbol x) x)
+    | AVQuoteColon, KIntegerArray x    -> vec (app_pairs f (fun x -> KInteger x) x)
+    | AVQuoteColon, KFloatArray x      -> vec (app_pairs f (fun x -> KFloat x) x)
+    | AVQuoteColon, KCharArray x       -> vec (app_pairs f (fun x -> KChar x) x)
     | AVQuoteColon, _                  -> raise (KError_type [x])
     (* 2/2 over-dyad (fold) (x f/ y) *)
     | AVForwardslash, KList y          -> Array.reduce_exn ~f y
@@ -472,6 +476,7 @@ let vexclaim x y = match x,y with
   | KIntegerArray x, KIntegerArray y -> KList (map x (fun i -> KIntegerArray (rot i y)))
   | KIntegerArray x, KFloatArray y   -> KList (map x (fun i -> KFloatArray (rot i y)))
   | KInteger x,      KInteger y      -> KInteger (x mod y)
+  | KIntegerArray x, KInteger y      -> KIntegerArray (map x (fun x -> x mod y))
   | KInteger x,      KFloat y        -> KFloat (Float.mod_float y (Float.of_int x))
   | KInteger x,      KIntegerArray y -> KIntegerArray (rot x y)
   | KInteger x,      KFloatArray y   -> KFloatArray (rot x y)
@@ -719,7 +724,7 @@ let vlodash x y = match x,y with
   | KIntegerArray x, KIntegerArray y    -> KList (cut x y (fun a -> KIntegerArray a))
   | KIntegerArray x, KSymbolArray y     -> KList (cut x y (fun a -> KSymbolArray a))
   | KIntegerArray x, KFloatArray y      -> KList (cut x y (fun a -> KFloatArray a))
-  | _ -> raise Not_implemented
+  | _ -> raise (KError_type [x;y])
 let rec vlodash_m = function
   | KInteger x      -> KInteger x
   | KFloat x        -> KInteger (Int.of_float (Float.round_down x))
@@ -969,6 +974,9 @@ and em f : k -> k =
     | _ -> raise Not_implemented)
    | _ -> raise Not_implemented
 and e _e = match _e with
+    | ESeq (EReturn x,_) -> e x
+    | ESeq (x,y) -> let x = e x in e y
+    | EIf (x,y,z) -> e (eif (e x) y z)
     | EAppD (x,f,y) -> let x = e x in let y = e y in ed f x y
     | EAppM (f,x) -> let x = e x in em f x
     | EId id -> eid id
@@ -985,8 +993,15 @@ and e _e = match _e with
     | EVerb _ | EAdverb _ -> KFunction (F _e)
     | EFunction f -> KFunction f
     | ENull -> KNull
+and eif = function
+  | KInteger 0 -> fun _ z -> z
+  | KInteger _ -> fun y _ -> y
+  | k          -> raise (KError_type [k])
 and ex _e x' = match _e with
     | EId id when id = IdRelative[Symbol.S 1] (*arg_x*) -> x'
+    | EIf(x,y,z) -> let x = ex x x' in ex ((eif x) y z) x'
+    | ESeq(EReturn x,_) -> ex x x'
+    | ESeq(x,y) -> let x = ex x x' in let y = ex y x' in y
     | EAppD (x,f,y) -> let x = ex x x' in let y = ex y x' in ed f x y
     | EAppM (f,x) -> let x = ex x x' in em f x
     | EAssign (v,x) -> let x = ex x x' in eassign v x
@@ -995,6 +1010,9 @@ and ex _e x' = match _e with
 and exy _e x' y' = match _e with
     | EId id when id = IdRelative[Symbol.S 1] (*arg_x*) -> x'
     | EId id when id = IdRelative[Symbol.S 2] (*arg_y*) -> y'
+    | EIf(x,y,z) -> let x = exy x x' y' in exy ((eif x) y z) x' y'
+    | ESeq(EReturn x,_) -> exy x x' y'
+    | ESeq(x,y) -> let x = exy x x' y' in let y = exy y x' y' in y
     | EAppD (x,f,y) -> let x = exy x x' y' in let y = exy y x' y' in ed f x y
     | EAppM (f,x) -> let x = exy x x' y' in em f x
     | EAssign (v,x) -> let x = exy x x' y' in eassign v x
@@ -1032,6 +1050,8 @@ let tokenize s = String.fold s ~init:(TkSpace,[],[]) ~f:(fun (s,xs,x) c -> let t
   |> Array.of_list_rev_map ~f:(fun (s,x) -> (s,List.rev x))
 
 let rec nvars e = match e with
+  | ESeq(x,y) -> Int.max (nvars x) (nvars y)
+  | EIf(x,y,z) -> Int.max (nvars x) (Int.max (nvars y) (nvars z))
   | EId v when v = arg_x -> 1
   | EId v when v = arg_y -> 2
   | EId _ -> 0
@@ -1041,6 +1061,7 @@ let rec nvars e = match e with
   | EAppM(f,x) -> Int.max (nvars f) (nvars x)
   | EAssign(v,x) -> Int.max (nvars (EId v)) (nvars x)
   | EList x -> map x nvars |> Array.max_elt ~cmp:Int.compare |> Option.value ~default:0
+  | EFunction _ -> 0
   | ESymbol _ -> 0|EIntegerArray _->0|EFloatArray _->0|ESymbolArray _->0|ECharArray _->0|EInteger _->0|EFloat _->0|EChar _->0|EVerb _->0|ENull->0
 let lookahead a i = try Some(a.(i)) with _ -> None
 let parse_verb = function |'+'->VPlus|'-'->VMinus|'*'->VStar|'!'->VExclaim|'%'->VPercent|'|'->VPipe|'&'->VAmpersand|'^'->VCircumflex|'<'->VLangle|'>'->VRangle|'='->VEquals|'#'->VPound|'_'->VLodash|'~'->VTilde|'$'->VDollar|'?'->VQuestion|'@'->VAt|'.'->VDot|','->VComma|_-> raise (Invalid_argument "verb")
@@ -1110,6 +1131,10 @@ and parse_fun t i = let j,t = parse_nested TkBraceO TkBraceC t i in let e = pars
   | 1 -> j, F1 e | 2 -> j, F2 e | _ -> raise Not_implemented
 and parse_exp e t i : e =
   match e,lookahead t i,lookahead t (i+1) with
+  | Some e,               Some(TkSemicolon,_),   Some(_)                 -> let e' = parse_exp None t (i+1) in ESeq(e,e')
+  | Some e,               Some(TkSemicolon,_),   None                    -> e
+  | _,                    Some(TkColon,_),       Some(TkBracketO,_)
+  | _,                    Some(TkAlpha,['i';'f']),_                      -> let j,[a;b;c] = parse_args t (i+2) in parse_exp (Some(EIf(a,b,c))) t j
   | None,                 Some(TkSpace,_),       Some (TkForwardslash,_)
   | None,                 None,                  None                    -> ENull
   | Some e,               Some(TkSpace,_),       Some (TkForwardslash,_)
@@ -1120,6 +1145,7 @@ and parse_exp e t i : e =
   | Some (EId v),         Some(TkColon,_),       Some (_)                -> let e = parse_exp None t (i+1) in EAssign(v, e)
   | Some (EId v),         Some(TkSpace,_),       Some(TkColon,_)         -> let e = parse_exp None t (i+2) in EAssign(v, e)
   | None,                 Some(TkAlpha,s),       _                       -> parse_exp (Some (EId (parse_id s))) t (i+1)
+  | Some e,               Some(TkParenO,_),      _                       -> EAppM(e,parse_exp None t i)
   | None,                 Some(TkBquote,_),      Some (TkAlpha,s)        -> parse_exp (Some (ESymbol (parse_symbol s))) t (i+2)
   | None,                 Some(TkBquote,_),      Some (TkDquote,_)       -> raise Not_implemented
   | None,                 Some(TkBquote,_),      Some (TkSpace,_)
@@ -1130,7 +1156,11 @@ and parse_exp e t i : e =
   | Some e,               Some(TkAlpha,s),       _                       -> let i,f = parse_adverb_composition (EId (parse_id s)) t (i+1) in
                                                                             EAppD(e,f,parse_exp None t i)
   | Some e,               Some(TkVerb,[c]),      _                       -> let i,f = parse_adverb_composition (EVerb (parse_verb c)) t (i+1) in
-                                                                            EAppD(e,f,parse_exp None t i)
+                                                                            (match lookahead t i with|None -> EFunction (F1 (EAppD(e,f,EId arg_x)))
+                                                                                                     | _ -> EAppD(e,f,parse_exp None t i))
+  | Some e,               Some(TkLodash,_) ,     _                       -> let i,f = parse_adverb_composition (EVerb VLodash) t (i+1) in
+                                                                            (match lookahead t i with|None -> EFunction (F1 (EAppD(e,f,EId arg_x)))
+                                                                                                     | _ -> EAppD(e,f,parse_exp None t i))
   | Some e,               Some(TkVerb,[c]),      _                       -> EAppD(e,EVerb (parse_verb c),parse_exp None t (i+1))
   | Some e,               Some(TkDot,_) ,        _                       -> EAppD(e,EVerb VDot,parse_exp None t (i+1))
   | Some e,               Some(TkLodash,_) ,     _                       -> let i,f = parse_adverb_composition (EVerb VLodash) t (i+1) in
