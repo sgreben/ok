@@ -3,7 +3,6 @@ open Core.Std
 FIXME: the parser cases for verb/adverb/function applications are messy, require cleanup for clarity
 FIXME: to parse sequential statements (e.g. a:10;b:a+1) we need to put each statement in parentheses
        (otherwise it's interpreted as a:(10;b:a+1), yielding an incorrect value for a)
-TODO: parse (and represent) partial verb application (e.g. (3 +) )
 TODO: parse
 TODO: proper equality tests for floats (tolerance), remove all polymorphic eq tests
 TODO: attributes
@@ -11,6 +10,7 @@ TODO: built-in operators (_in _draw etc.)
 TODO: special REPL commands (\p,..)
 TODO: missing operations: grep Not_implemented k.ml
 TODO: arbitrary function arity & (partial) application f[x;;z]
+X TODO: parse (and represent) partial verb application (e.g. (3 +) )
 X TODO: ktree
 X TODO: functions (e.g. {x@y-1})
 X TODO: definitions (e.g. elementat:123)
