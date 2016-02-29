@@ -1,6 +1,7 @@
 # What
 
-Here's a WIP implementation of the [K 2.0 language](http://en.wikipedia.org/wiki/K_(programming_language)) in OCaml. Some basic things already work. A whole bunch of things does not (yet).
+Here's a WIP implementation of the [K 2.0 language](http://en.wikipedia.org/wiki/K_(programming_language)) in OCaml (4.02.3). Some basic things already work. A whole bunch of things does not (yet).
+
 
 # Why
 
@@ -83,7 +84,7 @@ $ ./k.native
 
 # Current status & notes
 
-Messy, but getting there. OK currently implements just enough to "play around with K". Many features essential to a production system are missing.
+Messy, but getting there. *ok* currently implements just enough to "play around with K". Many features essential to a production system are missing.
 
 The core language is covered almost entirely, while the standard library is quite incomplete.
 
