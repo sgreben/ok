@@ -84,7 +84,7 @@ $ ./k.native
 
 # Build
 
-- Make sure you're using **OCaml (>=4.02.3)**. If you are using the [opam](https://opam.ocaml.org/) package manager (recommended), you can check this using `opam switch` and, if you are using an older version, switch to 4.02.3 using `opam switch 4.02.3`.
+- Make sure you have **OCaml (>=4.02.3)** installed. If you are using the [opam](https://opam.ocaml.org/) package manager (recommended), you can check this using `opam switch` and, if you are using an older version, switch to 4.02.3 using `opam switch 4.02.3`.
 - Build the executable: `make k`
 - (Optionally) run the end-to-end tests: `make test-e2e`
 
