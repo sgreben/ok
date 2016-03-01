@@ -27,7 +27,7 @@ The [Islands](https://github.com/kevinlawler/kona/wiki/Islands) example from the
   rb:   {(1_)'1_ x}                        / remove the border of zeroes
   adj:  {(,x),(-1 1!'\:x),(-1 1)!\:x}      / adjacent cells
   mrg:  {(~~x)*|/adj x}                    / merge neighboring ids
-  rc:   {l:0,,/x;g:=l;l[g]:!#g;(^x)#1_ l}  / renumber ids sequentially
+  rc:   {.[x;(;);(?0,,/x)?]}               / renumber ids sequentially
   isl:  {rc rb(mrg/col ab x)}              / find islands
   isl grid
 (1 0 0 0 2
@@ -82,6 +82,12 @@ $ ./k.native
    ))
 ~~~~
 
+# Build
+
+- Make sure you're using **OCaml (>=4.02.3)**. If you are using the [opam](https://opam.ocaml.org/) package manager (recommended), you can check this using `opam switch` and, if you are using an older version, switch to 4.02.3 using `opam switch 4.02.3`.
+- Build the executable: `make k`
+- (Optionally) run the end-to-end tests: `make test-e2e`
+
 # Current status & notes
 
 Messy, but getting there. *ok* currently implements just enough to "play around with K". Many features essential to a production system are missing.
@@ -110,6 +116,5 @@ As a special-case workaround, the current workspace (entire K-tree) can be saved
         "my_workspace"
           test
         123
-
-- Performance is currently terrible. In particular, `Amend[;;]` always creates a deep copy, even if the structure is only being referenced once.
+- Performance is currently terrible. In particular, `Amend` always creates a deep copy, even if the structure is only being referenced once.
 - Compiler warnings: many partial patterns. Mainly due to infeasible cases omitted for brevity.

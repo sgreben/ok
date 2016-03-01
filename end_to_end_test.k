@@ -45,15 +45,25 @@ ab:   {e:{(0,)'x};+(e(+e x))}
 rb:   {(1_)'1_ x}
 adj:  {(,x),(-1 1!'\:x),(-1 1)!\:x}
 mrg:  {(~~x)*|/adj x}
-rc:   {l:0,,/x;g:=l;l[g]:!#g;(^x)#1_ l}
+rc:   {.[x;(;);(?0,,/x)?]}
 isl:  {rc rb(mrg/col ab x)}
 \d .k
-tests["islands";,("6x5";{islands.isl islands.grid};(1 0 0 0 2
+tests["islands";,("1  ";{islands.isl islands.grid};(1 0 0 0 2
                                                     1 1 1 0 0
                                                     0 0 0 0 3
                                                     0 0 0 3 3
                                                     4 0 3 3 3
                                                     0 0 3 0 3))]
+\d islands
+rc: {l:0,,/x;g:=l;l[g]:!#g;(^x)#1_ l}  / original version from Kona wiki
+\d .k
+tests["islands";,("2  ";{islands.isl islands.grid};(1 0 0 0 2
+                                                    1 1 1 0 0
+                                                    0 0 0 0 3
+                                                    0 0 0 3 3
+                                                    4 0 3 3 3
+                                                    0 0 3 0 3))]
+
 / (* Idioms *)
 leapyear:{(+/~x!'4 100 400)!2}
 tests["leap year";,("1699-1712";{leapyear' 1699+!14};0 0 0 0 0 1 0 0 0 1 0 0 0 1)]

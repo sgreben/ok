@@ -1,4 +1,4 @@
-.PHONY: all clean k
+.PHONY: all clean k test-e2e
 
 all: k
 
@@ -7,3 +7,6 @@ k:
 
 clean:
 	ocamlbuild -clean
+
+test-e2e:
+	echo "\\\\\\" | ./k.native end_to_end_test.k
